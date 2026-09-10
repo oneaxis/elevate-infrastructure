@@ -25,10 +25,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Normalize WIF provider variable
+        id: wif
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+        run: |
+          # Tolerate both https://iam.googleapis.com/... and //iam.googleapis.com/... forms.
+          echo "provider=${WIF_PROVIDER#https://iam.googleapis.com/}" >> "$GITHUB_OUTPUT"
+
       - name: Authenticate to GCP via Workload Identity Federation
         uses: google-github-actions/auth@v3
         with:
-          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          workload_identity_provider: ${{ steps.wif.outputs.provider }}
           service_account: ${{ vars.DEPLOY_SA }}
 
       - name: Setup OpenTofu
