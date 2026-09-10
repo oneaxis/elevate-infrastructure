@@ -75,6 +75,11 @@ resource "google_project_iam_member" "deployer_roles" {
     "roles/artifactregistry.admin",
     "roles/secretmanager.admin",
     "roles/storage.admin",
+    # IAM plane: manage service accounts + their IAM bindings, the WIF
+    # pool/provider, and the project-level bindings declared in this module.
+    "roles/iam.serviceAccountAdmin",
+    "roles/iam.workloadIdentityPoolAdmin",
+    "roles/resourcemanager.projectIamAdmin",
   ])
   project = var.project_id
   role    = each.value
