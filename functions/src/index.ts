@@ -100,7 +100,7 @@ async function chatCompletion(
   };
   const reply = payload.choices?.[0]?.message?.content;
   if (!reply) {
-    throw new UpstreamError(provider, 502, 'Upstream returned no completion content');
+    throw new UpstreamError(baseUrl, 502, 'Upstream returned no completion content');
   }
   return reply;
 }
