@@ -21,6 +21,10 @@ jobs:
     name: Package function & deploy via OpenTofu
     runs-on: ubuntu-latest
     environment: production
+    env:
+      # terraform.tfvars is local-only (may contain secret values); CI gets the
+      # project id as a variable instead.
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
