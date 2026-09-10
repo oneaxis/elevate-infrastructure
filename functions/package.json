@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "package": "npm run build && mkdir -p ../build && python3 -m zipfile -c ../build/function.zip package.json package-lock.json dist/"
+    "package": "npm run build && mkdir -p ../build && python3 -m zipfile -c ../build/function.zip package.json package-lock.json tsconfig.json dist/ src/"
   },
   "dependencies": {
     "firebase-admin": "^12.7.0"

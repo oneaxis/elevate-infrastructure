@@ -99,7 +99,7 @@ resource "google_storage_bucket" "function_source" {
 }
 
 resource "google_storage_bucket_object" "function_source" {
-  name         = "function-source-${substr(sha1(file("${path.module}/${var.function_source_path}")), 0, 12)}.zip"
+  name         = "function-source-${substr(filesha1("${path.module}/${var.function_source_path}"), 0, 12)}.zip"
   bucket       = google_storage_bucket.function_source.name
   source       = "${path.module}/${var.function_source_path}"
   content_type = "application/zip"
