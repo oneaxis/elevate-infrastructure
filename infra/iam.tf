@@ -25,6 +25,15 @@ resource "google_service_account_iam_member" "deployer_actas_runtime" {
   member             = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# Cloud Functions 2nd gen builds run as the Compute Engine default service
+# account, so the deployer must be able to act as it when creating/updating
+# the function.
+resource "google_service_account_iam_member" "deployer_actas_compute_default" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${data.google_project.this.number}-compute@developer.gserviceaccount.com"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 ###############################################################################
 # Workload Identity Federation (keyless CI auth, no service account keys)
 ###############################################################################
