@@ -80,7 +80,6 @@ async function chatCompletion(
   model: string,
   messages: ChatMessage[],
 ): Promise<string> {
-  const provider = baseUrl.includes('bigmodel') ? 'glm' : 'groq';
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -93,7 +92,7 @@ async function chatCompletion(
   });
 
   if (!response.ok) {
-    throw new UpstreamError(provider, response.status, await response.text());
+    throw new UpstreamError(baseUrl, response.status, await response.text());
   }
 
   const payload = (await response.json()) as {
