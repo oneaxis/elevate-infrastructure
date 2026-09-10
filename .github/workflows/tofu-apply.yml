@@ -20,6 +20,7 @@ jobs:
   apply:
     name: Package function & deploy via OpenTofu
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Checkout
         uses: actions/checkout@v4

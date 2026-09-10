@@ -107,6 +107,8 @@ resource "google_project_iam_member" "runtime_roles" {
     "roles/artifactregistry.reader",
     "roles/monitoring.metricWriter",
     "roles/logging.logWriter",
+    # Verifies (and consumes) the App Check tokens sent by clients.
+    "roles/firebaseappcheck.tokenVerifier",
   ])
   project = var.project_id
   role    = each.value
