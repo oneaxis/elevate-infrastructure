@@ -24,7 +24,7 @@ jobs:
     env:
       # terraform.tfvars is local-only (may contain secret values); CI gets the
       # project id as a variable instead.
-      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID || 'elevate-1c1e9' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
