@@ -1,0 +1,21 @@
+{
+  "name": "elevate-ai-gateway",
+  "version": "1.0.0",
+  "description": "Keyless, authless AI gateway with App Check enforcement and GLM/Groq failover",
+  "main": "dist/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "package": "npm run build && mkdir -p ../build && python3 -m zipfile -c ../build/function.zip package.json package-lock.json dist/"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,5 @@
+project_id = "your-gcp-project-id"
+# region             = "us-central1"
+# github_repository  = "oneaxis/elevate-infrastructure"
+# glm_api_key        = "REPLACE_ME_VIA_GLCLOUD"
+# groq_api_key       = "REPLACE_ME_VIA_GLCLOUD"

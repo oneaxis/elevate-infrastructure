@@ -1,0 +1,19 @@
+# OpenTofu
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+plan.txt
+infra/terraform.tfvars
+
+# Node / function build
+node_modules/
+build/
+dist/
+*.tsbuildinfo
+
+# Misc
+.DS_Store
+*.log

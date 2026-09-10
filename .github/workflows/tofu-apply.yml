@@ -1,0 +1,65 @@
+name: Tofu Apply
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/**"
+      - "functions/**"
+
+permissions:
+  id-token: write # Workload Identity Federation
+  contents: read
+
+concurrency:
+  group: tofu-apply-production
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Package function & deploy via OpenTofu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: latest
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Package gateway function bundle
+        working-directory: functions
+        run: |
+          npm ci
+          npm run package
+
+      - name: Tofu init
+        working-directory: infra
+        run: tofu init -input=false
+
+      - name: Tofu apply
+        working-directory: infra
+        run: tofu apply -auto-approve -input=false -lock-timeout=120s
+
+      - name: Publish gateway URL
+        working-directory: infra
+        run: |
+          {
+            echo "### AI Gateway deployed :rocket:"
+            echo "Gateway URL: \`$(tofu output -raw gateway_url)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
