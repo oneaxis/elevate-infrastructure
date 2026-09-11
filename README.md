@@ -20,43 +20,22 @@ single request.
                                                                    - Model routing & failover
 ```
 
-## Model tiers
+## Model tiers & multi-provider failover chains
 
-| Tier        | Primary                                              | Failover chain                                            |
-| ----------- | ---------------------------------------------------- | --------------------------------------------------------- |
-| `main`      | GLM `glm-5.3-flash` ($0.00 while free window, 50 concurrent reqs) | Groq `openai/gpt-oss-120b` → Groq `openai/gpt-oss-20b` on HTTP 429/402/503/504 |
-| `secondary` | Groq `openai/gpt-oss-20b` (fast/chat)                | GLM `glm-5.3-flash` on HTTP 429/402/503/504               |
+The gateway implements generic, env-driven failover chains (`AI_CHAIN_MAIN`, `AI_CHAIN_SECONDARY`) walking left-to-right on HTTP 402/404/408/429/5xx and timeouts (8s per attempt, 25s total budget).
+
+| Tier | Failover chain (walked left to right) | Cost Profile |
+| :--- | :--- | :--- |
+| **`main`** | `glm:glm-5.3-flash` → `groq:openai/gpt-oss-120b` → `groq:openai/gpt-oss-20b` → `openrouter:nvidia/nemotron-3-super-120b-a12b:free` → `gemini:gemini-3.7-flash` (free key) → `gemini_paid:gemini-3.7-flash` (paid fallback) | **100% Free** for links 1–5; link 6 is the ultimate emergency fallback |
+| **`secondary`** | `groq:openai/gpt-oss-20b` → `groq:openai/gpt-oss-120b` → `openrouter:nvidia/nemotron-3-super-120b-a12b:free` → `gemini:gemini-3.5-flash-lite` (free key) → `gemini_paid:gemini-3.5-flash-lite` (paid fallback) | **100% Free** for links 1–4; link 5 is the ultimate emergency fallback |
 
 ## Model selection & rate limits (verified 2026-09)
 
-The original issue concept (`glm-4-flash` + Groq `llama-3.3-70b-versatile` /
-`llama-3.1-8b-instant`) no longer matches reality:
-
-- **Groq shut down** `llama-3.3-70b-versatile` and `llama-3.1-8b-instant` for
-  free/developer tiers on **2026-08-16** (Enterprise-only since then). The
-  officially recommended replacements are the `openai/gpt-oss-*` models, which
-  our Groq org lists at **30 req/min, 1,000 req/day, 8K TPM, 200K TPD** each
-  (per-model limits).
-- **Z.ai retired `glm-4-flash`.** The always-free models left are
-  `glm-4.7-flash` (1 concurrent request) and `glm-4.5-flash` (2) — both too
-  slow for the coach. `glm-5.3-flash` is the standout: **50 concurrent
-  requests** and currently **free** ("Limited-time Free" on the Z.ai pricing
-  page; if the free window ends it is ~$0.075/M input + $0.25/M output ≈
-  single-digit dollars at this app's scale).
-
-Capacity check against the target quota (10 head-coach + 10 assistant requests
-per user/day, ~1,000 MAU worst case = 20,000 req/day; realistic 15–30k/month):
-
-- Z.ai rate limits are **concurrency**-based, not daily: 50 in-flight requests
-  sustains far above the worst-case average (~14 req/min at 4s latency), so the
-  main tier has huge headroom.
-- Groq free tier is **daily-capped** (1K RPD per model), which is why Groq is
-  only ever a *failover* for `main` (rare by design) and the secondary tier
-  fails over *to GLM* — the two Groq models combined also give 2K req/day of
-  burst protection. Coaching prompts stay well under Z.ai's 8K-context
-  throttle threshold (the gateway rejects inputs above 8,000 chars).
-- `402` (payment required) is included in the failover statuses so a GLM
-  paywall degrades to Groq instead of erroring.
+- **GLM (`glm-5.3-flash`)**: Free tier on Z.ai with 50 concurrent requests. Fails over immediately on balance exhaustion (HTTP 402) or concurrency throttling (429).
+- **Groq (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`)**: Groq free tier with 30 RPM / 1,000 RPD per model ($0.00).
+- **OpenRouter (`nvidia/nemotron-3-super-120b-a12b:free`)**: Active 120B model under OpenRouter's `:free` lineup ($0.00).
+- **Gemini Free (`GEMINI_API_KEY`)**: Google AI Studio key created in an unbilled Google project (15 RPM / 1,500 RPD free tier, $0.00).
+- **Gemini Paid (`GEMINI_PAID_API_KEY`)**: Attached to Firebase Blaze billing as the last-resort emergency backstop. Only reached if all preceding free providers fail.
 
 Gateway request/response:
 
@@ -131,12 +110,12 @@ check with a plan summary comment, and pushes to `main` deploy automatically.
 
 | Resource              | Free tier coverage                                                        |
 | --------------------- | ------------------------------------------------------------------------- |
-| Cloud Functions 2nd gen (us-central1) | 2M invocations, 400K GB-s, 200K GHz-s per month (~15–30k requests planned) |
-| Secret Manager        | 6 active secret versions (we use 2)                                       |
+| Cloud Functions 2nd gen / Cloud Run (prod & dev) | 2M invocations, 400K GB-s, 200K GHz-s per month, scale-to-zero |
+| Secret Manager        | 6 active secret versions (we use exactly 5: GLM, Groq, OpenRouter, Gemini Free, Gemini Paid) |
 | Artifact Registry     | 0.5 GB, kept below cap by KEEP(2) / delete-untagged(1d) / delete-old(7d)  |
 | Cloud Storage (US)    | 5 GB-month Standard + 5k Class-A / 50k Class-B ops (state + source zips)  |
 | Workload Identity     | Free                                                                       |
-| GLM-5.3-Flash / Groq gpt-oss | $0.00 free tiers (GLM model swap is a variable if its free window ends) |
+| AI Model Free Tiers   | GLM-5.3-Flash, Groq gpt-oss, OpenRouter :free, Gemini Free Tier (15 RPM / 1,500 RPD) |
 
 ## Rotating API keys
 
@@ -147,6 +126,9 @@ function reads `latest`):
 ```bash
 gcloud secrets versions add GLM_API_KEY --project <PROJECT_ID> --data-file=-
 gcloud secrets versions add GROQ_API_KEY --project <PROJECT_ID> --data-file=-
+gcloud secrets versions add OPENROUTER_API_KEY --project <PROJECT_ID> --data-file=-
+gcloud secrets versions add GEMINI_API_KEY --project <PROJECT_ID> --data-file=-
+gcloud secrets versions add GEMINI_PAID_API_KEY --project <PROJECT_ID> --data-file=-
 ```
 
 ## App Check registration (one-time, in Firebase console)

@@ -96,23 +96,6 @@ resource "google_project_iam_member" "deployer_roles" {
 }
 
 ###############################################################################
-# Public, authless invocation
-#
-# The gateway is intentionally reachable without GCP credentials ("authless"):
-# every request must instead carry a valid, consumed Firebase App Check token,
-# enforced by the function itself. No other ingress protection is applied.
-###############################################################################
-
-resource "google_cloudfunctions2_function_iam_member" "public_invoker" {
-  project        = var.project_id
-  location       = var.region
-  cloud_function = google_cloudfunctions2_function.gateway.name
-  role           = "roles/cloudfunctions.invoker"
-  member         = "allUsers"
-  depends_on     = [google_cloudfunctions2_function.gateway]
-}
-
-###############################################################################
 # Function runtime permissions
 ###############################################################################
 
@@ -131,14 +114,20 @@ resource "google_project_iam_member" "runtime_roles" {
 
 # Direct secret access is granted ONLY to the function's runtime service
 # account (never to the deployer, never to humans).
-resource "google_secret_manager_secret_iam_member" "runtime_glm_accessor" {
-  secret_id = google_secret_manager_secret.glm_api_key.id
+resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
+  for_each = google_secret_manager_secret.provider_key
+
+  secret_id = each.value.id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
-resource "google_secret_manager_secret_iam_member" "runtime_groq_accessor" {
-  secret_id = google_secret_manager_secret.groq_api_key.id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.runtime.email}"
+moved {
+  from = google_secret_manager_secret_iam_member.runtime_glm_accessor
+  to   = google_secret_manager_secret_iam_member.runtime_accessor["glm"]
+}
+
+moved {
+  from = google_secret_manager_secret_iam_member.runtime_groq_accessor
+  to   = google_secret_manager_secret_iam_member.runtime_accessor["groq"]
 }

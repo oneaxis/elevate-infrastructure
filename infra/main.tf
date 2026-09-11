@@ -40,18 +40,13 @@ resource "google_artifact_registry_repository" "gateway" {
 }
 
 ###############################################################################
-# Secret Manager (provider API keys, injected as function env vars)
+# Secret Manager (provider API keys, shared by all gateway environments)
 ###############################################################################
 
-resource "google_secret_manager_secret" "glm_api_key" {
-  secret_id = "GLM_API_KEY"
-  replication {
-    auto {}
-  }
-}
+resource "google_secret_manager_secret" "provider_key" {
+  for_each = toset(keys(var.provider_base_urls))
 
-resource "google_secret_manager_secret" "groq_api_key" {
-  secret_id = "GROQ_API_KEY"
+  secret_id = "${upper(each.key)}_API_KEY"
   replication {
     auto {}
   }
@@ -60,24 +55,18 @@ resource "google_secret_manager_secret" "groq_api_key" {
 # Placeholder versions so the very first deployment succeeds; rotate with
 # `gcloud secrets versions add GLM_API_KEY --data-file=-` (Secret Manager's
 # 6 active versions are free).
-resource "google_secret_manager_secret_version" "glm_api_key" {
-  secret      = google_secret_manager_secret.glm_api_key.name
-  secret_data = var.glm_api_key
-  lifecycle {
-    ignore_changes = [secret_data]
-  }
-}
+resource "google_secret_manager_secret_version" "provider_key" {
+  for_each = google_secret_manager_secret.provider_key
 
-resource "google_secret_manager_secret_version" "groq_api_key" {
-  secret      = google_secret_manager_secret.groq_api_key.name
-  secret_data = var.groq_api_key
+  secret      = each.value.name
+  secret_data = var.provider_initial_keys[each.key]
   lifecycle {
     ignore_changes = [secret_data]
   }
 }
 
 ###############################################################################
-# Function source bucket + packaged source (US = Always Free storage tier)
+# Function source bucket (US = Always Free storage tier, shared by prod + dev)
 ###############################################################################
 
 resource "google_storage_bucket" "function_source" {
@@ -98,61 +87,75 @@ resource "google_storage_bucket" "function_source" {
   }
 }
 
-resource "google_storage_bucket_object" "function_source" {
-  name         = "function-source-${substr(filesha1("${path.module}/${var.function_source_path}"), 0, 12)}.zip"
-  bucket       = google_storage_bucket.function_source.name
-  source       = "${path.module}/${var.function_source_path}"
-  content_type = "application/zip"
+###############################################################################
+# Gateway environments: production + development
+#
+# Both run the identical function against the shared secrets; dev exists so
+# app development never burns production capacity or noise on prod logs.
+###############################################################################
+
+module "prod" {
+  source = "./gateway"
+
+  project_id                    = var.project_id
+  region                        = var.region
+  function_name                 = "ai-gateway"
+  source_bucket_name            = google_storage_bucket.function_source.name
+  runtime_service_account_email = google_service_account.runtime.email
+  chain_main                    = var.chain_main
+  chain_secondary               = var.chain_secondary
+  provider_base_urls            = var.provider_base_urls
+  provider_secrets              = { for name, secret in google_secret_manager_secret.provider_key : name => secret.secret_id }
 }
 
-###############################################################################
-# Cloud Functions 2nd gen (Cloud Run) gateway
-###############################################################################
+module "dev" {
+  source = "./gateway"
 
-resource "google_cloudfunctions2_function" "gateway" {
-  name     = "ai-gateway"
-  project  = var.project_id
-  location = var.region
+  project_id                    = var.project_id
+  region                        = var.region
+  function_name                 = "ai-gateway-dev"
+  source_bucket_name            = google_storage_bucket.function_source.name
+  runtime_service_account_email = google_service_account.runtime.email
+  chain_main                    = var.chain_main
+  chain_secondary               = var.chain_secondary
+  provider_base_urls            = var.provider_base_urls
+  provider_secrets              = { for name, secret in google_secret_manager_secret.provider_key : name => secret.secret_id }
+}
 
-  build_config {
-    runtime     = "nodejs22"
-    entry_point = "aiGateway"
-    source {
-      storage_source {
-        bucket = google_storage_bucket.function_source.name
-        object = google_storage_bucket_object.function_source.name
-      }
-    }
-  }
+# State migration: these resources used to live in the root module. Moving
+# (instead of recreate) keeps the production function — and above all the
+# rotated secret versions — untouched.
+moved {
+  from = google_secret_manager_secret.glm_api_key
+  to   = google_secret_manager_secret.provider_key["glm"]
+}
 
-  service_config {
-    min_instance_count    = 0 # scale to zero
-    max_instance_count    = 10
-    available_memory      = "256M"
-    timeout_seconds       = 30
-    ingress_settings      = "ALLOW_ALL"
-    service_account_email = google_service_account.runtime.email
+moved {
+  from = google_secret_manager_secret.groq_api_key
+  to   = google_secret_manager_secret.provider_key["groq"]
+}
 
-    environment_variables = {
-      GLM_BASE_URL         = var.glm_base_url
-      GROQ_BASE_URL        = var.groq_base_url
-      GLM_MODEL            = var.glm_model
-      GROQ_FAILOVER_MODELS = join(",", var.groq_failover_models)
-      GROQ_SECONDARY_MODEL = var.groq_secondary_model
-    }
+moved {
+  from = google_secret_manager_secret_version.glm_api_key
+  to   = google_secret_manager_secret_version.provider_key["glm"]
+}
 
-    secret_environment_variables {
-      key        = "GLM_API_KEY"
-      project_id = var.project_id
-      secret     = google_secret_manager_secret.glm_api_key.secret_id
-      version    = "latest"
-    }
+moved {
+  from = google_secret_manager_secret_version.groq_api_key
+  to   = google_secret_manager_secret_version.provider_key["groq"]
+}
 
-    secret_environment_variables {
-      key        = "GROQ_API_KEY"
-      project_id = var.project_id
-      secret     = google_secret_manager_secret.groq_api_key.secret_id
-      version    = "latest"
-    }
-  }
+moved {
+  from = google_storage_bucket_object.function_source
+  to   = module.prod.google_storage_bucket_object.function_source
+}
+
+moved {
+  from = google_cloudfunctions2_function.gateway
+  to   = module.prod.google_cloudfunctions2_function.gateway
+}
+
+moved {
+  from = google_cloudfunctions2_function_iam_member.public_invoker
+  to   = module.prod.google_cloudfunctions2_function_iam_member.public_invoker
 }

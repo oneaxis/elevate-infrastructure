@@ -6,31 +6,46 @@ import { getAppCheck } from 'firebase-admin/app-check';
 // server; no service account keys are ever baked into the deployment.
 initializeApp();
 
-const GLM_BASE_URL = process.env.GLM_BASE_URL ?? 'https://api.z.ai/api/paas/v4';
-const GROQ_BASE_URL = process.env.GROQ_BASE_URL ?? 'https://api.groq.com/openai/v1';
-// Free-capable lineup as of 2026-09 (see README "Model selection & rate limits"):
-// glm-5.3-flash currently free with 50 concurrent requests; glm-4-flash was retired.
-const GLM_MODEL = process.env.GLM_MODEL ?? 'glm-5.3-flash';
-// Groq free tier (30 RPM / 1K RPD each): official llama-3.x replacements.
-const GROQ_FAILOVER_MODELS = (
-  process.env.GROQ_FAILOVER_MODELS ?? 'openai/gpt-oss-120b,openai/gpt-oss-20b'
-)
-  .split(',')
-  .map((m) => m.trim())
-  .filter(Boolean);
-const GROQ_SECONDARY_MODEL = process.env.GROQ_SECONDARY_MODEL ?? 'openai/gpt-oss-20b';
+// Every supported upstream (Z.ai/GLM, Groq, Google Gemini, OpenRouter, ...)
+// exposes an OpenAI-compatible /chat/completions endpoint, so a single client
+// serves them all. The failover chains below are plain ordered lists of
+// "provider:model" entries — adding a provider means adding
+// {PROVIDER}_BASE_URL + a {PROVIDER}_API_KEY secret, never code changes.
+const CHAIN_MAIN = envOrDefault(
+  'AI_CHAIN_MAIN',
+  'glm:glm-5.3-flash,groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,' +
+    'openrouter:nvidia/nemotron-3-super-120b-a12b:free,' +
+    'gemini:gemini-3.7-flash,gemini_paid:gemini-3.7-flash',
+);
+const CHAIN_SECONDARY = envOrDefault(
+  'AI_CHAIN_SECONDARY',
+  'groq:openai/gpt-oss-20b,groq:openai/gpt-oss-120b,' +
+    'openrouter:nvidia/nemotron-3-super-120b-a12b:free,' +
+    'gemini:gemini-3.5-flash-lite,gemini_paid:gemini-3.5-flash-lite',
+);
 
-/** Upstream statuses that trigger failover: concurrency/limits (429), GLM
- *  outages (503/504) and balance exhaustion (402, e.g. if GLM drops free tier). */
-const FAILOVER_STATUSES = new Set([429, 402, 503, 504]);
-const UPSTREAM_TIMEOUT_MS = 12_000;
+// Latency policy: the client should get a reply in human time. Each attempt
+// gets at most UPSTREAM_TIMEOUT_MS; the whole chain walk stops at
+// TOTAL_BUDGET_MS (kept below the 30s function timeout so we can still return
+// a clean 502 instead of a client-side timeout).
+const UPSTREAM_TIMEOUT_MS = numOrDefault('UPSTREAM_TIMEOUT_MS', 8_000);
+const TOTAL_BUDGET_MS = numOrDefault('TOTAL_BUDGET_MS', 25_000);
 const MAX_MESSAGES = 20;
 const MAX_CONTENT_CHARS = 8_000;
-/** Best-effort burst protection for the free GLM concurrency quota (3 req/min). */
+/** Best-effort burst protection for the free GLM/Groq quotas (3 req/min). */
 const BURST_LIMIT_PER_MINUTE = 3;
 
+/** Upstream statuses that trigger failover: concurrency/limits (429), GLM
+ *  balance exhaustion (402), retired/missing models (404), request timeouts (408)
+ *  and upstream outages (5xx). 401/403/400 are configuration bugs and fail loudly instead. */
+const FAILOVER_STATUSES = new Set([402, 404, 408, 429, 500, 502, 503, 504]);
+
 type ModelTier = 'main' | 'secondary';
-type GatewayProvider = 'glm' | 'groq-backup' | 'groq-secondary';
+
+interface ChainEntry {
+  provider: string;
+  model: string;
+}
 
 interface GatewayRequest {
   modelTier?: ModelTier;
@@ -41,7 +56,7 @@ interface GatewayRequest {
 interface GatewayResponse {
   reply: string;
   modelUsed: string;
-  provider: GatewayProvider;
+  provider: string;
 }
 
 interface ChatMessage {
@@ -57,6 +72,33 @@ class UpstreamError extends Error {
   ) {
     super(`${provider} responded with HTTP ${status}`);
   }
+}
+
+function envOrDefault(name: string, fallback: string): string {
+  const value = process.env[name];
+  return value && value.trim().length > 0 ? value : fallback;
+}
+
+function numOrDefault(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseChain(csv: string): ChainEntry[] {
+  return csv
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const separator = entry.indexOf(':');
+      return separator <= 0
+        ? null
+        : {
+            provider: entry.slice(0, separator),
+            model: entry.slice(separator + 1),
+          };
+    })
+    .filter((entry): entry is ChainEntry => entry !== null);
 }
 
 const burstWindow = new Map<string, number[]>();
@@ -75,10 +117,12 @@ function isBurstLimited(appCheckToken: string): boolean {
 }
 
 async function chatCompletion(
+  provider: string,
   baseUrl: string,
   apiKey: string,
   model: string,
   messages: ChatMessage[],
+  timeoutMs: number,
 ): Promise<string> {
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -87,12 +131,12 @@ async function chatCompletion(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({ model, messages }),
-    // Fail fast: retries are handled by the failover logic, not by fetch.
-    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    // Fail fast: retries are handled by walking the chain, not by fetch.
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!response.ok) {
-    throw new UpstreamError(baseUrl, response.status, await response.text());
+    throw new UpstreamError(provider, response.status, await response.text());
   }
 
   const payload = (await response.json()) as {
@@ -100,7 +144,7 @@ async function chatCompletion(
   };
   const reply = payload.choices?.[0]?.message?.content;
   if (!reply) {
-    throw new UpstreamError(baseUrl, 502, 'Upstream returned no completion content');
+    throw new UpstreamError(provider, 502, 'Upstream returned no completion content');
   }
   return reply;
 }
@@ -186,65 +230,47 @@ async function route(
   tier: ModelTier,
   messages: ChatMessage[],
 ): Promise<GatewayResponse> {
-  const groqKey = process.env.GROQ_API_KEY ?? '';
-  const glmKey = process.env.GLM_API_KEY ?? '';
+  const chain = parseChain(tier === 'main' ? CHAIN_MAIN : CHAIN_SECONDARY);
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
+  let lastError: unknown = new Error('Provider chain is empty');
 
-  // Each tier tries its primary provider first, then walks the failover chain
-  // on rate-limit / outage / balance errors.
-  const chain: Array<{
-    baseUrl: string;
-    apiKey: string;
-    model: string;
-    provider: GatewayProvider;
-  }> =
-    tier === 'main'
-      ? [
-          {
-            baseUrl: GLM_BASE_URL,
-            apiKey: glmKey,
-            model: GLM_MODEL,
-            provider: 'glm',
-          },
-          ...GROQ_FAILOVER_MODELS.map((model) => ({
-            baseUrl: GROQ_BASE_URL,
-            apiKey: groqKey,
-            model,
-            provider: 'groq-backup' as const,
-          })),
-        ]
-      : [
-          {
-            baseUrl: GROQ_BASE_URL,
-            apiKey: groqKey,
-            model: GROQ_SECONDARY_MODEL,
-            provider: 'groq-secondary',
-          },
-          {
-            baseUrl: GLM_BASE_URL,
-            apiKey: glmKey,
-            model: GLM_MODEL,
-            provider: 'glm',
-          },
-        ];
-
-  let lastError: unknown;
   for (const attempt of chain) {
+    const remaining = deadline - Date.now();
+    // Keep a slice of budget so we can still answer after the walk fails.
+    const timeoutMs = Math.min(UPSTREAM_TIMEOUT_MS, remaining - 1_000);
+    if (timeoutMs <= 0) {
+      console.warn(`Latency budget exhausted before ${attempt.provider}:${attempt.model}`);
+      break;
+    }
+
+    const baseUrl = process.env[`${attempt.provider.toUpperCase()}_BASE_URL`];
+    const apiKey = process.env[`${attempt.provider.toUpperCase()}_API_KEY`];
+    if (!baseUrl || !apiKey) {
+      console.warn(`Provider ${attempt.provider} is not configured, skipping`);
+      continue;
+    }
+
     try {
       const reply = await chatCompletion(
-        attempt.baseUrl,
-        attempt.apiKey,
+        attempt.provider,
+        baseUrl,
+        apiKey,
         attempt.model,
         messages,
+        timeoutMs,
       );
       return { reply, modelUsed: attempt.model, provider: attempt.provider };
     } catch (error) {
+      const isUpstreamError = error instanceof UpstreamError;
       const shouldFailover =
-        error instanceof UpstreamError && FAILOVER_STATUSES.has(error.status);
+        !isUpstreamError || FAILOVER_STATUSES.has(error.status);
       if (!shouldFailover) {
         throw error;
       }
       console.warn(
-        `${attempt.model} responded with ${(error as UpstreamError).status}, failing over`,
+        `${attempt.provider}:${attempt.model} failed (${
+          isUpstreamError ? `HTTP ${error.status}` : 'network/timeout'
+        }), moving to the next provider`,
       );
       lastError = error;
     }

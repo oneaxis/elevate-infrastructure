@@ -1,6 +1,11 @@
 output "gateway_url" {
-  description = "Public HTTPS endpoint of the AI gateway (send the App Check token via the X-Firebase-AppCheck header)."
-  value       = google_cloudfunctions2_function.gateway.service_config[0].uri
+  description = "Public HTTPS endpoint of the production AI gateway (send the App Check token via the X-Firebase-AppCheck header)."
+  value       = module.prod.gateway_url
+}
+
+output "gateway_url_dev" {
+  description = "Public HTTPS endpoint of the development gateway. App dev builds pass it via --dart-define=ELVT_AI_GATEWAY_URL=<url>."
+  value       = module.dev.gateway_url
 }
 
 output "workload_identity_provider" {
@@ -14,7 +19,7 @@ output "deployer_service_account" {
 }
 
 output "runtime_service_account" {
-  description = "Runtime service account email (the only identity with secretAccessor on the API keys)."
+  description = "Runtime service account email (the only identity with secretAccessor on the provider API keys)."
   value       = google_service_account.runtime.email
 }
 
