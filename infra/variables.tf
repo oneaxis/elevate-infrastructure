@@ -15,39 +15,82 @@ variable "github_repository" {
   default     = "oneaxis/elevate-infrastructure"
 }
 
+variable "ai_providers" {
+  description = "Registered LLM providers with their OpenAI-compatible endpoints and initial secret placeholders."
+  type = map(object({
+    base_url    = string
+    initial_key = optional(string, "REPLACE_ME_VIA_GLCLOUD")
+  }))
+  default = {
+    glm = {
+      base_url = "https://api.z.ai/api/paas/v4"
+    }
+    groq = {
+      base_url = "https://api.groq.com/openai/v1"
+    }
+    gemini = {
+      base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    }
+    gemini_paid = {
+      base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    }
+    openrouter = {
+      base_url = "https://openrouter.ai/api/v1"
+    }
+  }
+}
+
 variable "chain_main" {
-  description = "Ordered main-tier failover chain ('provider:model' entries, walked left to right). Free providers first; Gemini is billed per token if project has billing attached (or free if using an unbilled project key), so it is strictly the LAST resort; OpenRouter :free models sit before it."
-  type        = string
-  default     = "glm:glm-5.3-flash,groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,openrouter:nvidia/nemotron-3-super-120b-a12b:free,gemini:gemini-3.7-flash,gemini_paid:gemini-3.7-flash"
+  description = "Ordered main-tier failover chain, walked left to right. Each entry defines the provider key and model slug."
+  type = list(object({
+    provider = string
+    model    = string
+  }))
+  default = [
+    { provider = "glm", model = "glm-5.3-flash" },
+    { provider = "groq", model = "openai/gpt-oss-120b" },
+    { provider = "groq", model = "openai/gpt-oss-20b" },
+    { provider = "openrouter", model = "nvidia/nemotron-3-super-120b-a12b:free" },
+    { provider = "gemini", model = "gemini-3.7-flash" },
+    { provider = "gemini_paid", model = "gemini-3.7-flash" },
+  ]
+
+  validation {
+    condition     = length(var.chain_main) > 0
+    error_message = "chain_main must contain at least one failover target."
+  }
+
+  validation {
+    condition = alltrue([
+      for item in var.chain_main : length(trimspace(item.provider)) > 0 && length(trimspace(item.model)) > 0
+    ])
+    error_message = "Each entry in chain_main must have non-empty provider and model fields."
+  }
 }
 
 variable "chain_secondary" {
-  description = "Ordered secondary-tier failover chain for the fast assistant/chat tier."
-  type        = string
-  default     = "groq:openai/gpt-oss-20b,groq:openai/gpt-oss-120b,openrouter:nvidia/nemotron-3-super-120b-a12b:free,gemini:gemini-3.5-flash-lite,gemini_paid:gemini-3.5-flash-lite"
-}
+  description = "Ordered secondary-tier failover chain for fast chat and assistant queries."
+  type = list(object({
+    provider = string
+    model    = string
+  }))
+  default = [
+    { provider = "groq", model = "openai/gpt-oss-20b" },
+    { provider = "groq", model = "openai/gpt-oss-120b" },
+    { provider = "openrouter", model = "nvidia/nemotron-3-super-120b-a12b:free" },
+    { provider = "gemini", model = "gemini-3.5-flash-lite" },
+    { provider = "gemini_paid", model = "gemini-3.5-flash-lite" },
+  ]
 
-variable "provider_base_urls" {
-  description = "OpenAI-compatible base URL per provider. All of them expose /chat/completions, so the gateway client stays provider-agnostic."
-  type        = map(string)
-  default = {
-    glm         = "https://api.z.ai/api/paas/v4"
-    groq        = "https://api.groq.com/openai/v1"
-    gemini      = "https://generativelanguage.googleapis.com/v1beta/openai"
-    gemini_paid = "https://generativelanguage.googleapis.com/v1beta/openai"
-    openrouter  = "https://openrouter.ai/api/v1"
+  validation {
+    condition     = length(var.chain_secondary) > 0
+    error_message = "chain_secondary must contain at least one failover target."
   }
-}
 
-variable "provider_initial_keys" {
-  description = "Initial secret values per provider. Rotate in production via `gcloud secrets versions add <PROVIDER>_API_KEY` — the function always reads `latest`."
-  type        = map(string)
-  default = {
-    glm         = "REPLACE_ME_VIA_GLCLOUD"
-    groq        = "REPLACE_ME_VIA_GLCLOUD"
-    gemini      = "REPLACE_ME_VIA_GLCLOUD"
-    gemini_paid = "REPLACE_ME_VIA_GLCLOUD"
-    openrouter  = "REPLACE_ME_VIA_GLCLOUD"
+  validation {
+    condition = alltrue([
+      for item in var.chain_secondary : length(trimspace(item.provider)) > 0 && length(trimspace(item.model)) > 0
+    ])
+    error_message = "Each entry in chain_secondary must have non-empty provider and model fields."
   }
-  sensitive = true
 }

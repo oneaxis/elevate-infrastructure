@@ -84,14 +84,18 @@ The gateway implementation in `functions/src/index.ts` is provider-agnostic and 
 - **Fast Fail Statuses**: `401`, `403`, and `400` fail immediately without retrying (they signify configuration bugs or invalid client bodies).
 - **Timeouts**: `UPSTREAM_TIMEOUT_MS = 8000` (8s per attempt). `TOTAL_BUDGET_MS = 25000` (25s total request budget, safely under the 30s Cloud Function timeout).
 
-### C. Dual Environment Architecture (`prod` and `dev`)
-Declared via root module instantiations of the `./gateway` submodule:
-- **`module.prod` (`ai-gateway`)**:
-  Live endpoint: `https://ai-gateway-97165394176.us-central1.run.app`
-- **`module.dev` (`ai-gateway-dev`)**:
-  Dev endpoint: `https://ai-gateway-dev-97165394176.us-central1.run.app`
-- Both share the source bucket and Secret Manager secrets.
-- Mobile client targets dev builds via `--dart-define=ELVT_AI_GATEWAY_URL=<url>`.
+### C. Dual Environment & GitOps Staging Pipeline
+Declared via root module instantiations of the `./gateway` submodule and deployed via branch-aware CI/CD:
+- **`dev` Branch (`module.dev` / `ai-gateway-dev`)**:
+  - Live dev endpoint: `https://ai-gateway-dev-97165394176.us-central1.run.app`
+  - Push to `dev` triggers GitHub Actions CI which runs `tofu apply -target=module.dev`, deploying strictly to development without touching production.
+  - Mobile client targets dev builds via `--dart-define=ELVT_AI_GATEWAY_URL=<url>`.
+- **`main` Branch (`module.prod` / `ai-gateway`)**:
+  - Live production endpoint: `https://ai-gateway-97165394176.us-central1.run.app`
+  - Changes are promoted from `dev` to `main` via Pull Request.
+  - PR checks run `tofu plan` showing exact infrastructure changes.
+  - Merging the PR to `main` runs full `tofu apply` in GitHub Actions.
+- Both environments share the source bucket and Secret Manager secrets to strictly preserve zero-cost guarantees.
 
 ### D. Security & Ingress Model
 - **Authless & Keyless Ingress**: Cloud Run services have `roles/run.invoker` granted to `allUsers`. No GCP credentials or service account keys are exposed to the client.
@@ -119,8 +123,9 @@ resource "google_cloud_run_service_iam_member" "public_invoker" {
 
 ## 4. Operational Rules for Agents
 
-1. **NEVER Touch Production Locally**:
-   - Production deployments must strictly be handled by GitHub Actions CI on `main`.
+1. **NEVER Touch Production Locally & Respect Branching**:
+   - Production deployments are exclusively managed by GitHub Actions on merge to `main`.
+   - Active development must be committed to `dev` (or feature branches merged into `dev`).
    - Local testing and manual applies must target the dev module:
      ```bash
      tofu apply -target=module.dev
