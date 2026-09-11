@@ -57,12 +57,12 @@ best-effort 3 req/min burst throttle to protect the free GLM concurrency.
 ```
 .
 ├── .github/workflows/tofu-plan.yml   # PR checks: type-check, fmt, validate, plan (+ PR comment)
-├── .github/workflows/tofu-apply.yml  # main push: package, deploy via WIF
+├── .github/workflows/tofu-apply.yml  # push to dev: deploys dev; merge to main: deploys prod
 ├── functions/                        # Node.js 22 gateway source (TypeScript)
 ├── infra/                            # OpenTofu manifests
 │   ├── backend.tf                    #   GCS remote state (US multi-region bucket)
 │   ├── versions.tf                   #   provider pinning (google ~> 6.0)
-│   ├── variables.tf                  #   project, region, models, initial key values
+│   ├── variables.tf                  #   project, region, structured providers, validated chains
 │   ├── iam.tf                        #   WIF pool/provider, deployer + runtime SA, bindings
 │   ├── main.tf                       #   registry cleanup, secrets, source bucket, function
 │   └── outputs.tf                    #   gateway URL + GitHub Actions variables
@@ -103,8 +103,10 @@ gh variable set WIF_PROVIDER -b "$(cd infra && tofu output -raw workload_identit
 gh variable set DEPLOY_SA    -b "$(cd infra && tofu output -raw deployer_service_account)"
 ```
 
-From now on: PRs touching `infra/**` or `functions/**` get a fmt/validate/plan
-check with a plan summary comment, and pushes to `main` deploy automatically.
+From now on:
+- PRs touching `infra/**` or `functions/**` get a fmt/validate/plan check with a plan summary comment.
+- Pushes to `dev` automatically deploy to the **development environment** (`ai-gateway-dev`), leaving production untouched.
+- Merges to `main` promote changes to **production** (`ai-gateway`).
 
 ## Zero-cost footprint
 

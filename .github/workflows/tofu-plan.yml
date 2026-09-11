@@ -2,6 +2,9 @@ name: Tofu Plan
 
 on:
   pull_request:
+    branches:
+      - main
+      - dev
     paths:
       - "infra/**"
       - "functions/**"
@@ -15,11 +18,13 @@ jobs:
   plan:
     name: Format, type-check, validate & plan
     runs-on: ubuntu-latest
-    environment: production
+    environment: ${{ github.base_ref == 'main' && 'production' || 'development' }}
     env:
       # terraform.tfvars is local-only (may contain secret values); CI gets the
       # project id as a variable instead.
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID || 'elevate-1c1e9' }}
+      WIF_PROVIDER: ${{ vars.WIF_PROVIDER || '//iam.googleapis.com/projects/97165394176/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider' }}
+      DEPLOY_SA: ${{ vars.DEPLOY_SA || 'ai-gateway-deployer@elevate-1c1e9.iam.gserviceaccount.com' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -27,7 +32,7 @@ jobs:
       - name: Normalize WIF provider variable
         id: wif
         env:
-          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          WIF_PROVIDER: ${{ env.WIF_PROVIDER }}
         run: |
           # Tolerate both https://iam.googleapis.com/... and //iam.googleapis.com/... forms.
           echo "provider=${WIF_PROVIDER#https://iam.googleapis.com/}" >> "$GITHUB_OUTPUT"
@@ -36,7 +41,7 @@ jobs:
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ steps.wif.outputs.provider }}
-          service_account: ${{ vars.DEPLOY_SA }}
+          service_account: ${{ env.DEPLOY_SA }}
 
       - name: Setup OpenTofu
         uses: opentofu/setup-opentofu@v2
@@ -73,7 +78,13 @@ jobs:
         working-directory: infra
         run: |
           set -o pipefail
-          tofu plan -input=false -no-color -lock-timeout=120s | tee plan.txt
+          if [ "${{ github.base_ref }}" = "dev" ]; then
+            echo "Generating plan for DEV environment (module.dev)..."
+            tofu plan -target=module.dev -input=false -no-color -lock-timeout=120s | tee plan.txt
+          else
+            echo "Generating plan for PRODUCTION environment..."
+            tofu plan -input=false -no-color -lock-timeout=120s | tee plan.txt
+          fi
 
       - name: Post plan summary to PR
         if: always() && steps.plan.outcome != 'skipped'

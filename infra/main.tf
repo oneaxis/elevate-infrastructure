@@ -44,7 +44,7 @@ resource "google_artifact_registry_repository" "gateway" {
 ###############################################################################
 
 resource "google_secret_manager_secret" "provider_key" {
-  for_each = toset(keys(var.provider_base_urls))
+  for_each = var.ai_providers
 
   secret_id = "${upper(each.key)}_API_KEY"
   replication {
@@ -59,7 +59,7 @@ resource "google_secret_manager_secret_version" "provider_key" {
   for_each = google_secret_manager_secret.provider_key
 
   secret      = each.value.name
-  secret_data = var.provider_initial_keys[each.key]
+  secret_data = var.ai_providers[each.key].initial_key
   lifecycle {
     ignore_changes = [secret_data]
   }
@@ -102,9 +102,9 @@ module "prod" {
   function_name                 = "ai-gateway"
   source_bucket_name            = google_storage_bucket.function_source.name
   runtime_service_account_email = google_service_account.runtime.email
-  chain_main                    = var.chain_main
-  chain_secondary               = var.chain_secondary
-  provider_base_urls            = var.provider_base_urls
+  chain_main                    = join(",", [for c in var.chain_main : "${c.provider}:${c.model}"])
+  chain_secondary               = join(",", [for c in var.chain_secondary : "${c.provider}:${c.model}"])
+  provider_base_urls            = { for k, v in var.ai_providers : k => v.base_url }
   provider_secrets              = { for name, secret in google_secret_manager_secret.provider_key : name => secret.secret_id }
 }
 
@@ -116,10 +116,19 @@ module "dev" {
   function_name                 = "ai-gateway-dev"
   source_bucket_name            = google_storage_bucket.function_source.name
   runtime_service_account_email = google_service_account.runtime.email
-  chain_main                    = var.chain_main
-  chain_secondary               = var.chain_secondary
-  provider_base_urls            = var.provider_base_urls
+  chain_main                    = join(",", [for c in var.chain_main : "${c.provider}:${c.model}"])
+  chain_secondary               = join(",", [for c in var.chain_secondary : "${c.provider}:${c.model}"])
+  provider_base_urls            = { for k, v in var.ai_providers : k => v.base_url }
   provider_secrets              = { for name, secret in google_secret_manager_secret.provider_key : name => secret.secret_id }
+}
+
+check "valid_chain_providers" {
+  assert {
+    condition = alltrue([
+      for item in concat(var.chain_main, var.chain_secondary) : contains(keys(var.ai_providers), item.provider)
+    ])
+    error_message = "Every model in chain_main and chain_secondary must reference a provider registered in var.ai_providers."
+  }
 }
 
 # State migration: these resources used to live in the root module. Moving
